@@ -1,59 +1,32 @@
 # %%
-"""Explain the fixed seed676 MAE + N=8 forecasts for 1988--2025.
+"""Explain local MAE + N=8 forecasts with common-background TreeSHAP.
 
-The selected ``ModelIndex`` comes from the fixed-selection CSV and is resolved
-to a rebuilt ``ModelID`` through the reconstruction report. The 2016--2025
-values displayed as predictions come from the held-out test CSV. Feature
-attributions use exact interventional TreeSHAP with the same standardized
-1979--2015 background for every selected model. A single 2016-anchor baseline
-``B*`` is used for reporting, while each model's baseline shift is retained as
-a separate non-physical term so that local additivity is not altered.
+Inputs are the project selection CSVs, precursor data and numbered model
+files under models/. The local fixed_candidate_attributions.csv supplies
+the candidate-model uncertainty boxes. Calculations stay in memory; only
+figures are saved.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-PROJECT_ROOT = SCRIPT_DIR.parent
-SELECTION_FILE = (
-    PROJECT_ROOT
-    / "add_sensitive"
-    / "output"
-    / "fixed_mae_n8"
-    / "seed676_MAE_N8_1988_2025.csv"
-)
-HELDOUT_FILE = (
-    PROJECT_ROOT
-    / "add_sensitive"
-    / "output"
-    / "heldout_train_test"
-    / "test_2016_2025.csv"
-)
-MODEL_DIR = PROJECT_ROOT / "DATA" / "rebuild_seed676" / "models"
-MODEL_MANIFEST_FILE = (
-    PROJECT_ROOT / "DATA" / "rebuild_seed676" / "rebuild_seed676_report.csv"
-)
+PROJECT_ROOT = SCRIPT_DIR
+SELECTION_FILE = PROJECT_ROOT / "selection_results" / "AMME_MAE_N8_1988_2025.csv"
+HELDOUT_FILE = PROJECT_ROOT / "selection_results" / "test_n8_predict.csv"
+MODEL_DIR = PROJECT_ROOT / "models"
+
 DATA_FILE = PROJECT_ROOT / "precursor_factors_1979_2025.csv"
 FIG_DIR = SCRIPT_DIR / "fig"
-FIVE_YEAR_UNCERTAINTY_FILE = (
-    PROJECT_ROOT
-    / "shap_effect"
-    / "output"
-    / "five_year_common_background"
-    / "five_year_common_background_source_data.csv"
-)
-ANNUAL_COMMON_BACKGROUND_FILE = (
-    PROJECT_ROOT / "shap_effect" / "output" / "main_attributions.csv"
-)
-FIXED_CANDIDATE_ATTRIBUTIONS_FILE = (
-    PROJECT_ROOT / "shap_effect" / "output" / "fixed_candidate_attributions.csv"
-)
+
+
+FIXED_CANDIDATE_ATTRIBUTIONS_FILE = PROJECT_ROOT / "fixed_candidate_attributions.csv"
 
 START_YEAR = 1988
 END_YEAR = 2025
@@ -143,49 +116,19 @@ def observed_onset_mean(observed: pd.Series) -> float:
     return float(values.mean())
 
 
-def load_model_manifest(path: Path = MODEL_MANIFEST_FILE) -> pd.DataFrame:
-    """Load the authoritative ModelIndex-to-ModelID reconstruction mapping."""
-
-    path = Path(path)
-    if not path.is_file():
-        raise FileNotFoundError(f"rebuilt-model report not found: {path}")
-
-    manifest = pd.read_csv(path)
-    required = {"BaseSeed", "ModelIndex", "ModelID", "Reproduced", "PklFile"}
-    missing_columns = sorted(required - set(manifest.columns))
-    if missing_columns:
-        raise ValueError(f"model report is missing columns: {missing_columns}")
-
-    for column in ("BaseSeed", "ModelIndex", "ModelID"):
-        manifest[column] = pd.to_numeric(
-            manifest[column], errors="raise"
-        ).astype(int)
-    if not manifest["BaseSeed"].eq(676).all():
-        raise ValueError("model report contains a BaseSeed other than 676")
-
-    if manifest["ModelIndex"].duplicated().any():
-        duplicates = sorted(
-            manifest.loc[
-                manifest["ModelIndex"].duplicated(keep=False), "ModelIndex"
-            ].unique()
-        )
-        raise ValueError(f"duplicate ModelIndex values in model report: {duplicates}")
-
-    reproduced = manifest["Reproduced"]
-    if reproduced.dtype != bool:
-        reproduced = reproduced.astype(str).str.lower().map(
-            {"true": True, "false": False}
-        )
-    if reproduced.isna().any():
-        raise ValueError("model report contains invalid Reproduced values")
-    manifest["Reproduced"] = reproduced.astype(bool)
-    return manifest.sort_values("ModelIndex").reset_index(drop=True)
+def _local_path(path: Path) -> Path:
+    resolved = Path(path).resolve()
+    try:
+        resolved.relative_to(PROJECT_ROOT)
+    except ValueError as error:
+        raise ValueError(f"File paths must stay inside {PROJECT_ROOT}: {resolved}") from error
+    return resolved
 
 
 def load_heldout_predictions(path: Path = HELDOUT_FILE) -> pd.DataFrame:
     """Load the canonical MAE + N=8 predictions for 2016--2025."""
 
-    path = Path(path)
+    path = _local_path(path)
     if not path.is_file():
         raise FileNotFoundError(f"held-out prediction CSV not found: {path}")
 
@@ -224,134 +167,62 @@ def load_heldout_predictions(path: Path = HELDOUT_FILE) -> pd.DataFrame:
 def load_mae_n8_selection(
     path: Path = SELECTION_FILE,
     heldout_path: Path = HELDOUT_FILE,
-    manifest_path: Path = MODEL_MANIFEST_FILE,
 ) -> pd.DataFrame:
-    """Load the fixed selection and reconcile its two prediction sources."""
-
-    path = Path(path)
+    path = _local_path(path)
     if not path.is_file():
         raise FileNotFoundError(f"MAE + N=8 selection CSV not found: {path}")
-
     frame = pd.read_csv(path)
     required = {
-        "Year",
-        "ModelIndex",
-        "ModelID",
-        "Prediction",
-        "Observed",
-        "Error",
-        "AbsError",
+        "Year", "ModelIndex", "ModelID", "Prediction", "Observed", "Error", "AbsError",
     }
-    missing_columns = sorted(required - set(frame.columns))
-    if missing_columns:
-        raise ValueError(f"selection CSV is missing columns: {missing_columns}")
-
+    missing = sorted(required - set(frame.columns))
+    if missing:
+        raise ValueError(f"selection CSV is missing columns: {missing}")
     for column in ("Year", "ModelIndex", "ModelID"):
         frame[column] = pd.to_numeric(frame[column], errors="raise").astype(int)
     for column in ("Prediction", "Observed", "Error", "AbsError"):
         frame[column] = pd.to_numeric(frame[column], errors="raise").astype(float)
-
-    frame = (
-        frame.loc[frame["Year"].between(START_YEAR, END_YEAR)]
-        .sort_values("Year")
-        .reset_index(drop=True)
-    )
-    expected_years = list(range(START_YEAR, END_YEAR + 1))
-    if frame["Year"].tolist() != expected_years:
-        missing_years = sorted(set(expected_years) - set(frame["Year"]))
-        duplicate_years = sorted(
-            frame.loc[frame["Year"].duplicated(keep=False), "Year"].unique()
-        )
-        raise ValueError(
-            "selection CSV must contain exactly one row for every year "
-            f"from {START_YEAR} to {END_YEAR}; "
-            f"missing={missing_years}, duplicates={duplicate_years}"
-        )
-    manifest = load_model_manifest(manifest_path)
-    model_id_by_index = manifest.set_index("ModelIndex")["ModelID"]
-    mapped_model_ids = frame["ModelIndex"].map(model_id_by_index)
-    if mapped_model_ids.isna().any():
-        missing_indices = frame.loc[mapped_model_ids.isna(), "ModelIndex"].tolist()
-        raise ValueError(
-            f"ModelIndex values missing from model report: {missing_indices}"
-        )
-    mapped_model_ids = mapped_model_ids.astype(int)
-    if not np.array_equal(frame["ModelID"].to_numpy(), mapped_model_ids.to_numpy()):
-        raise ValueError("selection CSV ModelID does not match the model report")
-    frame["ModelID"] = mapped_model_ids
-
-    failed = frame.loc[
-        ~frame["ModelIndex"].map(
-            manifest.set_index("ModelIndex")["Reproduced"]
-        ),
-        "ModelIndex",
-    ].tolist()
-    if failed:
-        raise ValueError(f"selected models were not successfully rebuilt: {failed}")
-
+    frame = frame.loc[frame["Year"].between(START_YEAR, END_YEAR)]
+    frame = frame.sort_values("Year").reset_index(drop=True)
+    if frame["Year"].tolist() != list(range(START_YEAR, END_YEAR + 1)):
+        raise ValueError("selection CSV must contain exactly one row per year from 1988 to 2025")
+    if (frame["ModelIndex"] < 0).any():
+        raise ValueError("ModelIndex must be non-negative")
+    if not np.array_equal(frame["ModelID"], frame["ModelIndex"] + 1):
+        raise ValueError("ModelID must equal zero-based ModelIndex + 1")
     frame["ModelPrediction"] = frame["Prediction"]
     heldout = load_heldout_predictions(heldout_path).set_index("Year")
     fixed_test = frame.set_index("Year").loc[HELDOUT_START_YEAR:END_YEAR]
-    if not np.array_equal(
-        fixed_test["Observed"].to_numpy(), heldout["Observed"].to_numpy()
-    ):
+    if not np.array_equal(fixed_test["Observed"], heldout["Observed"]):
         raise ValueError("fixed-selection and held-out observations do not match")
-    if not np.allclose(
-        fixed_test["Prediction"].to_numpy(),
-        heldout["Prediction"].to_numpy(),
-        rtol=0.0,
-        atol=5e-4,
-    ):
+    if not np.allclose(fixed_test["Prediction"], heldout["Prediction"], rtol=0.0, atol=5e-4):
         raise ValueError("fixed-selection and held-out predictions disagree")
-
-    heldout_rows = frame["Year"].between(HELDOUT_START_YEAR, END_YEAR)
+    for column in ("ModelIndex", "ModelID"):
+        if column in heldout and not np.array_equal(fixed_test[column], heldout[column]):
+            raise ValueError(f"fixed-selection and held-out {column} values disagree")
+    mask = frame["Year"].between(HELDOUT_START_YEAR, END_YEAR)
     for column in ("Prediction", "Observed", "Error", "AbsError"):
-        frame.loc[heldout_rows, column] = frame.loc[heldout_rows, "Year"].map(
-            heldout[column]
-        )
+        frame.loc[mask, column] = frame.loc[mask, "Year"].map(heldout[column])
     return frame
 
 
 def build_model_paths(
     selection: pd.DataFrame,
     model_dir: Path = MODEL_DIR,
-    manifest_path: Path = MODEL_MANIFEST_FILE,
 ) -> list[Path]:
-    """Resolve model files from ModelIndex through the reconstruction report."""
-
-    model_dir = Path(model_dir)
-    manifest = load_model_manifest(manifest_path)
-    manifest_by_index = manifest.set_index("ModelIndex")
-    model_rows = manifest_by_index.reindex(selection["ModelIndex"].to_numpy())
-    if model_rows["ModelID"].isna().any():
-        missing_indices = selection.loc[
-            model_rows["ModelID"].isna().to_numpy(), "ModelIndex"
-        ].tolist()
-        raise ValueError(
-            f"ModelIndex values missing from model report: {missing_indices}"
-        )
-    model_ids = model_rows["ModelID"].astype(int).reset_index(drop=True)
-    if "ModelID" in selection and not np.array_equal(
-        selection["ModelID"].to_numpy(dtype=int), model_ids.to_numpy()
-    ):
-        raise ValueError("selection ModelID does not match ModelIndex mapping")
-
-    paths = []
-    for model_id, pkl_file in zip(model_ids, model_rows["PklFile"]):
-        filename = PurePosixPath(str(pkl_file).replace("\\", "/")).name
-        expected_filename = f"bst_model_seed676_model{int(model_id)}.pkl"
-        if filename != expected_filename:
-            raise ValueError(
-                "model report filename does not match its ModelID: "
-                f"{filename!r} != {expected_filename!r}"
-            )
-        paths.append(model_dir / filename)
+    model_dir = _local_path(model_dir)
+    model_indices = selection["ModelIndex"].to_numpy(dtype=int)
+    model_ids = selection["ModelID"].to_numpy(dtype=int)
+    if (model_indices < 0).any() or not np.array_equal(model_ids, model_indices + 1):
+        raise ValueError("ModelID must equal zero-based ModelIndex + 1")
+    paths = [
+        _local_path(model_dir / f"bst_model_seed676_model{int(model_id)}.pkl")
+        for model_id in model_ids
+    ]
     missing = [path for path in paths if not path.is_file()]
     if missing:
         preview = "\n".join(str(path) for path in missing[:10])
-        raise FileNotFoundError(
-            f"{len(missing)} selected rebuilt model files are missing:\n{preview}"
-        )
+        raise FileNotFoundError(f"{len(missing)} selected model files are missing:\n{preview}")
     return paths
 
 
@@ -360,7 +231,7 @@ def load_standardized_data(
 ) -> tuple[pd.DataFrame, list[str], pd.Series]:
     """Load predictors using the same 1979--2015 scaling as the new models."""
 
-    path = Path(path)
+    path = _local_path(path)
     if not path.is_file():
         raise FileNotFoundError(f"precursor CSV not found: {path}")
 
@@ -479,7 +350,7 @@ def calculate_shap_results(
     for row, model_path in zip(selection.itertuples(index=False), model_paths):
         year = int(row.Year)
         sample = standardized.loc[[year], PREDICTOR_COLUMNS].to_numpy(dtype=float)
-        model = joblib.load(model_path)
+        model = joblib.load(_local_path(model_path))
         booster = model.get_booster()
         limit = _iteration_limit(model, booster)
         sliced_booster = booster[:limit]
@@ -642,78 +513,6 @@ def build_signed_table(
     joined.attrs["background_end"] = TRAIN_END
     joined.attrs["common_baseline_year"] = COMMON_BASELINE_YEAR
     return joined
-
-
-def validate_annual_adaptive_reference(
-    results: list[AnnualShapResult],
-    feature_names: list[str],
-    path: Path = ANNUAL_COMMON_BACKGROUND_FILE,
-) -> None:
-    """Require Figure 4 values to match the published adaptive trajectory."""
-
-    required = {
-        "scenario",
-        "year",
-        "feature",
-        "shap_value",
-        "common_baseline",
-    }
-    reference = pd.read_csv(path)
-    missing_columns = sorted(required - set(reference.columns))
-    if missing_columns:
-        raise ValueError(
-            f"annual common-background table is missing columns: {missing_columns}"
-        )
-    reference = reference.loc[
-        reference["scenario"].eq("annual_switched"),
-        ["year", "feature", "shap_value", "common_baseline"],
-    ].copy()
-    if reference.duplicated(["year", "feature"]).any():
-        raise ValueError("adaptive annual reference has duplicate year-feature rows")
-
-    expected = reference.pivot(
-        index="year", columns="feature", values="shap_value"
-    ).sort_index()
-    actual = pd.DataFrame(
-        {
-            result.year: dict(zip(feature_names, result.shap_values))
-            for result in results
-        }
-    ).T.sort_index()
-    actual.index.name = "year"
-    actual = actual.reindex(columns=feature_names)
-    expected = expected.reindex(index=actual.index, columns=feature_names)
-    if expected.isna().any().any():
-        raise ValueError("adaptive annual reference is incomplete for Figure 4")
-
-    differences = np.abs(
-        actual.to_numpy(dtype=float) - expected.to_numpy(dtype=float)
-    )
-    maximum_difference = float(np.max(differences, initial=0.0))
-    if maximum_difference > 5e-8:
-        location = np.unravel_index(np.argmax(differences), differences.shape)
-        year = int(actual.index[location[0]])
-        feature = str(actual.columns[location[1]])
-        raise ValueError(
-            "Figure 4 does not match the common-background adaptive trajectory; "
-            f"max difference={maximum_difference:.3e} at {year}, {feature}"
-        )
-
-    reference_baselines = pd.to_numeric(
-        reference["common_baseline"], errors="raise"
-    ).to_numpy(dtype=float)
-    result_baselines = np.asarray(
-        [result.common_baseline for result in results], dtype=float
-    )
-    if not np.allclose(
-        reference_baselines,
-        result_baselines[0],
-        rtol=0.0,
-        atol=1e-10,
-    ):
-        raise ValueError(
-            "Figure 4 and its adaptive reference use different common baselines"
-        )
 
 
 def plot_signed_lines(df_signed: pd.DataFrame, output_path: Path) -> None:
@@ -1024,7 +823,7 @@ def plot_signed_lines(df_signed: pd.DataFrame, output_path: Path) -> None:
         color="black",
         bbox=dict(facecolor="white", edgecolor="none", alpha=0.8, pad=0.5),
     )
-    fig.savefig(output_path, dpi=600, bbox_inches="tight", facecolor="white")
+    fig.savefig(_local_path(output_path), dpi=600, bbox_inches="tight", facecolor="white")
     plt.show()
 
 
@@ -1120,73 +919,6 @@ def five_year_mean_absolute_shap(df_signed: pd.DataFrame) -> pd.DataFrame:
     return mean_absolute_shap_by_periods(df_signed, periods)
 
 
-def load_five_year_uncertainty(
-    path: Path = FIVE_YEAR_UNCERTAINTY_FILE,
-) -> pd.DataFrame:
-    """Load validated model-choice variability from the fixed 2016 anchor."""
-
-    required = {
-        "feature",
-        "period_start",
-        "period_end",
-        "candidate_n_models",
-        "candidate_q025_mean_abs_shap",
-        "candidate_q25_mean_abs_shap",
-        "candidate_median_mean_abs_shap",
-        "candidate_q75_mean_abs_shap",
-        "candidate_q975_mean_abs_shap",
-        "adaptive_mean_abs_shap",
-        "adaptive_common_baseline",
-    }
-    table = pd.read_csv(path)
-    missing_columns = sorted(required - set(table.columns))
-    if missing_columns:
-        raise ValueError(
-            f"five-year uncertainty table is missing columns: {missing_columns}"
-        )
-
-    table = table.loc[table["feature"].isin(FIVE_YEAR_FEATURE_ORDER)].copy()
-    table["year_range"] = (
-        table["period_start"].astype(int).astype(str)
-        + "-"
-        + table["period_end"].astype(int).astype(str)
-    )
-    if table.duplicated(["year_range", "feature"]).any():
-        raise ValueError("five-year uncertainty table has duplicate period-feature rows")
-    if not table["candidate_n_models"].astype(int).eq(EXPECTED_ANCHOR_MODELS).all():
-        raise ValueError(
-            f"each uncertainty box must contain {EXPECTED_ANCHOR_MODELS} models"
-        )
-
-    adaptive_baselines = pd.to_numeric(
-        table["adaptive_common_baseline"], errors="raise"
-    ).to_numpy(dtype=float)
-    if not np.isfinite(adaptive_baselines).all():
-        raise ValueError("adaptive common baselines must be finite")
-    if not np.allclose(
-        adaptive_baselines,
-        adaptive_baselines[0],
-        rtol=0.0,
-        atol=1e-10,
-    ):
-        raise ValueError("uncertainty table does not use one common baseline")
-
-    quantile_columns = [
-        "candidate_q025_mean_abs_shap",
-        "candidate_q25_mean_abs_shap",
-        "candidate_median_mean_abs_shap",
-        "candidate_q75_mean_abs_shap",
-        "candidate_q975_mean_abs_shap",
-    ]
-    quantiles = table[quantile_columns].to_numpy(dtype=float)
-    if not np.isfinite(quantiles).all() or (quantiles < 0).any():
-        raise ValueError("five-year uncertainty quantiles must be finite and non-negative")
-    if (np.diff(quantiles, axis=1) < 0).any():
-        raise ValueError("five-year uncertainty quantiles are not monotonically ordered")
-
-    return table.set_index(["year_range", "feature"]).sort_index()
-
-
 def summarize_candidate_relative_uncertainty_by_periods(
     periods: tuple[tuple[int, int], ...],
     path: Path = FIXED_CANDIDATE_ATTRIBUTIONS_FILE,
@@ -1202,7 +934,7 @@ def summarize_candidate_relative_uncertainty_by_periods(
         "abs_shap",
         "common_baseline",
     }
-    table = pd.read_csv(path)
+    table = pd.read_csv(_local_path(path))
     missing_columns = sorted(required - set(table.columns))
     if missing_columns:
         raise ValueError(
@@ -1471,7 +1203,7 @@ def plot_five_year_bars(
     #     va="bottom",
     # )
     fig.tight_layout(rect=(0, 0.13, 1, 1))
-    fig.savefig(output_path, dpi=600, bbox_inches="tight", facecolor="white")
+    fig.savefig(_local_path(output_path), dpi=600, bbox_inches="tight", facecolor="white")
     plt.show()
 
 
@@ -1729,7 +1461,7 @@ def plot_two_period_bars(
         top=axes_top,
         hspace=panel_gap,
     )
-    fig.savefig(output_path, dpi=600, bbox_inches="tight", facecolor="white")
+    fig.savefig(_local_path(output_path), dpi=600, bbox_inches="tight", facecolor="white")
     plt.show()
 
 
@@ -1740,7 +1472,6 @@ def main() -> int:
     model_paths = build_model_paths(selection)
     standardized, feature_names, _ = load_standardized_data()
     results = calculate_shap_results(selection, model_paths, standardized)
-    validate_annual_adaptive_reference(results, feature_names)
 
     FIG_DIR.mkdir(parents=True, exist_ok=True)
     signed = build_signed_table(results, selection, feature_names)

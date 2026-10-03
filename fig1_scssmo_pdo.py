@@ -91,14 +91,10 @@ class AnalysisConfig:
         / "DATA/DATA/ERA5_native_SCSSM/SST"
         / "ERA5_ecmwf_SST_Y1940-2025_M01-12_monthly.nc"
     )
-    factors_file: Path = HERE.parent / "precursor_factors_1979_2025.csv"
+    factors_file: Path = HERE / "precursor_factors_1979_2025.csv"
     sm_file: Path = HERE.parent / "lg_scssm.csv"
-    xg_file: Path = (
-        HERE.parent
-        / "add_sensitive/output/fixed_mae_n8"
-        / "seed676_MAE_N8_1988_2025.csv"
-    )
-    output_file: Path = HERE / "pdo_fig_v1_revised.png"
+    xg_file: Path = HERE / "selection_results" / "AMME_MAE_N8_1988_2025.csv"
+    output_file: Path = HERE / "fig" / "pdo_fig_v1_revised.png"
     onset_start_year: int = 1979
     onset_end_year: int = 2025
     pdo_end_year: int = 2024
