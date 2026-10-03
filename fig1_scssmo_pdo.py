@@ -1,21 +1,3 @@
-"""Create the final PDO/SCSSM figure and print reviewer-audit statistics.
-
-This is the only script needed for the final analysis. It integrates the PDO
-calculation and moderation checks formerly kept in ``pdo_corr.py`` with the
-sliding F-test and bootstrap scan correction formerly kept in
-``pdo_f_reviewer.py``. One PNG is written; audit results are printed only.
-
-Panel a contrasts the observed onset dates, fitted means, and linear trends
-across three fixed periods, while the objectively defined contiguous PDO
-stages provide the background shading. The standardized 3--8-year onset
-component is retained to show variability. Panel b describes interannual variability with the absolute year-to-year
-difference and centred 11-year standard deviation of the standardized onset
-series. At each
-F-test boundary, two adjacent 11-year samples of the standardized onset series
-are compared. Serial dependence is handled with a stationary block bootstrap,
-and repeated overlapping tests are handled with the maximum F statistic across
-the complete scan.
-"""
 #%%
 from __future__ import annotations
 
